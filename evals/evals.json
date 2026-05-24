@@ -1,0 +1,23 @@
+{
+  "skill_name": "postman-push",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "把这个项目最近改动过的公开 API 同步到 Postman。项目里已经有 POSTMAN_WORKSPACE_ID、POSTMAN_COLLECTION_ID_OPEN 和对应 HOST，请优先只推送 Git diff 相关接口。",
+      "expected_output": "识别当前宿主的 Postman MCP 或 API fallback，读取 .env，按增量模式发现公开接口并同步到 OPEN collection。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "扫描当前仓库全部内部管理接口并推送到 Postman，内部接口应该归到 POSTMAN_COLLECTION_ID_INTERNAL，Host 用对应 _HOST 配置。",
+      "expected_output": "执行全量扫描，按 internal/admin/private 启发式选中 INTERNAL collection，并生成包含说明、参数和 header 的请求项。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "这个环境没有可直接用的 Postman MCP，你还是要把 API 文档推到 Postman。优先看 .env 里的 collection 配置，并使用 POSTMAN_API_KEY 兜底。",
+      "expected_output": "检测不到当前宿主 MCP 时走 Postman HTTP API，仍然能完成 collection 更新或给出缺失配置说明。",
+      "files": []
+    }
+  ]
+}
