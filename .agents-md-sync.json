@@ -1,0 +1,44 @@
+{
+  "output_language": "zh",
+  "nested_mode": "off",
+  "command_overrides": {
+    "install": null,
+    "dev": null,
+    "build": null,
+    "typecheck": null,
+    "test": null,
+    "lint": null,
+    "format": null
+  },
+  "dev_environment_tips": [
+    "这是 Python Agent Skill 仓库，无 package manager；脚本位于 `scripts/`，用 `python3` 直接运行。",
+    "核心工作流见 `SKILL.md`：`detect_postman_config.py` → `discover_apis.py` → `postman_push.py`。",
+    "push 脚本应在目标 API 项目根目录执行（传入 `--repo`），而非在本 skill 仓库内。",
+    "修改行为后，参考 `evals/evals.json` 中的用例做回归验证。"
+  ],
+  "code_style_guidelines": [
+    "保持 Python 3.10+ 语法（dataclass、type hints、`from __future__ import annotations`）。",
+    "脚本应支持 `--json` 输出，便于 Agent 自动化解析。",
+    "变更聚焦 skill 行为，避免无关 refactor 或大范围格式化。"
+  ],
+  "security_notes": [
+    "不得提交 `POSTMAN_API_KEY` 或目标项目 `.env` 中的凭证。",
+    "不要将 MCP bearer token 与 Postman API key 混用。"
+  ],
+  "pr_instructions": [
+    "说明对 `SKILL.md` 工作流或 `scripts/` 行为的改动。",
+    "若变更 API 发现或推送逻辑，同步更新 `references/` 中对应文档。",
+    "提交前手动运行相关脚本的 `--json` 输出做 smoke test。"
+  ],
+  "extra_checks": [
+    "确认 `scripts/*.py` 在 `python3` 下可正常执行 `--help`。",
+    "若修改同步规则，检查 `evals/evals.json` 用例是否仍匹配预期。"
+  ],
+  "blocked_paths": [
+    "__pycache__"
+  ],
+  "manual_notes_template": [
+    "本仓库 `README.md` 面向人类用户；`SKILL.md` 是 Agent 执行主指令。",
+    "与用户沟通时优先使用简体中文。"
+  ]
+}
