@@ -1,0 +1,109 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Sample API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/users/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/UserId"
+        }
+      ],
+      "get": {
+        "summary": "Get a user",
+        "tags": ["users"],
+        "parameters": [
+          {
+            "name": "includeProfile",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "Include profile details"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/users": {
+      "post": {
+        "summary": "Create a user",
+        "tags": ["users"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUser"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "UserId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "User identifier",
+        "schema": {
+          "type": "string",
+          "example": "user_123"
+        }
+      }
+    },
+    "schemas": {
+      "BaseUser": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "Primary email address",
+            "example": "user@example.test"
+          }
+        }
+      },
+      "CreateUser": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/BaseUser"
+          },
+          {
+            "type": "object",
+            "required": ["profile"],
+            "properties": {
+              "profile": {
+                "type": "object",
+                "description": "Public profile",
+                "properties": {
+                  "displayName": {
+                    "type": "string",
+                    "description": "Visible display name",
+                    "example": "Ada"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

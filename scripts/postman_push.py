@@ -17,6 +17,10 @@ from urllib.parse import urlsplit
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from env_utils import load_env_files
 
 
 def run_python_json(script: str, *args: str) -> dict[str, Any]:
@@ -26,17 +30,7 @@ def run_python_json(script: str, *args: str) -> dict[str, Any]:
 
 
 def load_env(repo: Path, explicit_env: str | None) -> dict[str, str]:
-    candidates = [Path(explicit_env).resolve()] if explicit_env else [repo / ".env", repo / ".env.local", repo / ".env.development"]
-    values: dict[str, str] = {}
-    for path in candidates:
-        if not path.exists():
-            continue
-        for raw in path.read_text().splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip("'\"")
+    values = load_env_files(repo, explicit_env)
     if "POSTMAN_API_KEY" in os.environ:
         values["POSTMAN_API_KEY"] = os.environ["POSTMAN_API_KEY"]
     return values
@@ -67,9 +61,15 @@ def collection_targets(env: dict[str, str]) -> list[CollectionTarget]:
 
 
 def classify_audience(apis: list[dict[str, Any]]) -> str:
+    audiences = classify_audiences(apis)
+    if "internal" in audiences:
+        return "internal"
+    return "open"
+
+
+def classify_api_audience(api: dict[str, Any]) -> str:
     joined = " ".join(
         part.lower()
-        for api in apis
         for part in ([api.get("path", "")] + [tag for tag in api.get("tags", []) if isinstance(tag, str)])
     )
     if any(token in joined for token in ("admin", "internal", "private", "backoffice")):
@@ -77,13 +77,22 @@ def classify_audience(apis: list[dict[str, Any]]) -> str:
     return "open"
 
 
-def choose_target(targets: list[CollectionTarget], explicit_key: str | None, audience: str) -> tuple[CollectionTarget, str]:
+def classify_audiences(apis: list[dict[str, Any]]) -> set[str]:
+    return {classify_api_audience(api) for api in apis}
+
+
+def choose_target(targets: list[CollectionTarget], explicit_key: str | None, audiences: set[str]) -> tuple[CollectionTarget, str]:
     if explicit_key:
         for target in targets:
             if target.key.lower() == explicit_key.lower():
                 return target, "explicit"
         raise SystemExit(f"Configured collections do not contain key {explicit_key!r}")
 
+    if len(audiences) > 1:
+        raise SystemExit(
+            "Discovered both open and internal APIs. Pass --collection-key to choose one collection, or narrow the scan with --include."
+        )
+    audience = next(iter(audiences), "open")
     if audience == "open":
         preferred = ("open", "public", "external")
     else:
@@ -342,6 +351,32 @@ def endpoint_signature(method: str, path: str) -> str:
     return f"{method.upper()} {normalize_signature_path(path)}"
 
 
+def collect_item_signatures(items: list[dict[str, Any]]) -> set[str]:
+    signatures: set[str] = set()
+    for item in items:
+        request_payload = item.get("request")
+        if isinstance(request_payload, dict) and request_payload.get("method"):
+            signatures.add(endpoint_signature(request_payload["method"], extract_item_path(item)))
+            continue
+        if "item" in item and isinstance(item["item"], list):
+            signatures.update(collect_item_signatures(item["item"]))
+    return signatures
+
+
+def preview_collection_changes(collection: dict[str, Any], apis: list[dict[str, Any]]) -> dict[str, Any]:
+    existing = collect_item_signatures(collection.get("item", []))
+    incoming = [endpoint_signature(api["method"], api["path"]) for api in apis]
+    updated = sorted(signature for signature in incoming if signature in existing)
+    created = sorted(signature for signature in incoming if signature not in existing)
+    return {
+        "created_count": len(created),
+        "updated_count": len(updated),
+        "preserved_count": len(existing - set(incoming)),
+        "created": created,
+        "updated": updated,
+    }
+
+
 def grouped_new_items(apis: list[dict[str, Any]], host: str | None) -> list[dict[str, Any]]:
     folders: dict[str, list[dict[str, Any]]] = {}
     for api in apis:
@@ -442,8 +477,19 @@ def main() -> int:
     parser.add_argument("--env-file", help="explicit env file")
     parser.add_argument("--include", action="append", default=[], help="substring filter for routes/modules/files")
     parser.add_argument("--discovery-json", help="precomputed discovery JSON file")
-    parser.add_argument("--dry-run", action="store_true", help="print payload summary without pushing")
+    parser.add_argument(
+        "--allow-full-fallback",
+        action="store_true",
+        help="allow incremental discovery to widen to a full scan when Git diff evidence is weak",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="print local discovery and target summary without fetching or pushing")
+    parser.add_argument("--preview", action="store_true", help="fetch the existing Postman collection and print created/updated counts without pushing")
+    parser.add_argument("--apply", action="store_true", help="write the merged collection to Postman after previewing changes")
     args = parser.parse_args()
+    if args.dry_run and (args.preview or args.apply):
+        parser.error("--dry-run cannot be combined with --preview or --apply")
+    if args.preview and args.apply:
+        parser.error("--preview cannot be combined with --apply")
 
     repo = Path(args.repo).resolve()
     detection = run_python_json("detect_postman_config.py", "--host", args.host_tool)
@@ -452,37 +498,88 @@ def main() -> int:
         discovery_args.extend(["--env-file", args.env_file])
     for include in args.include:
         discovery_args.extend(["--include", include])
+    if args.allow_full_fallback:
+        discovery_args.append("--allow-full-fallback")
     discovery = (
         json.loads(Path(args.discovery_json).read_text())
         if args.discovery_json
         else run_python_json("discover_apis.py", *discovery_args)
     )
+    if not discovery.get("apis"):
+        print(
+            json.dumps(
+                {
+                    "host_tool": detection["host"],
+                    "mcp_usable_in_current_host": detection["usable_via_current_host"],
+                    "result": "no-op",
+                    "reason": "No APIs were discovered to push.",
+                    "mode": discovery.get("mode"),
+                    "scan_scope": discovery.get("scan_scope"),
+                    "fallback_reason": discovery.get("fallback_reason"),
+                    "changed_files": discovery.get("changed_files", []),
+                    "candidate_files": discovery.get("candidate_files", []),
+                    "api_count": 0,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
     env = load_env(repo, args.env_file)
     targets = collection_targets(env)
+    if not env.get("POSTMAN_WORKSPACE_ID"):
+        raise SystemExit("POSTMAN_WORKSPACE_ID was not found in project env.")
     if not targets:
         raise SystemExit("No POSTMAN_COLLECTION_ID_* variables were found in project env.")
-    if not discovery.get("apis"):
-        raise SystemExit("No APIs were discovered to push.")
 
-    audience = classify_audience(discovery["apis"])
-    target, selection_reason = choose_target(targets, args.collection_key, audience)
+    audiences = classify_audiences(discovery["apis"])
+    target, selection_reason = choose_target(targets, args.collection_key, audiences)
+    if not target.host:
+        raise SystemExit(f"Missing POSTMAN_COLLECTION_ID_{target.key}_HOST for selected collection key {target.key}.")
     summary = {
         "host_tool": detection["host"],
         "mcp_usable_in_current_host": detection["usable_via_current_host"],
         "selection_reason": selection_reason,
+        "audiences": sorted(audiences),
         "workspace_id": env.get("POSTMAN_WORKSPACE_ID"),
         "collection_key": target.key,
         "collection_id": target.collection_id,
         "host": target.host,
         "api_count": len(discovery["apis"]),
+        "api_signatures": [endpoint_signature(api["method"], api["path"]) for api in discovery["apis"]],
     }
 
-    if args.dry_run:
-        print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if args.dry_run or not (args.preview or args.apply):
+        print(
+            json.dumps(
+                {
+                    **summary,
+                    "result": "dry-run",
+                    "note": "No remote collection was fetched and no write was performed. Re-run with --preview for remote diff or --apply to update Postman.",
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     api_key, auth_source = resolve_api_key(env, detection)
     if not api_key:
+        if args.preview:
+            print(
+                json.dumps(
+                    {
+                        **summary,
+                        "result": "preview",
+                        "auth_source": auth_source,
+                        "warning": "No usable Postman API key was found, so the existing collection was not fetched and created/updated counts are unavailable.",
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return 0
         raise SystemExit("No usable Postman API key was found. Set POSTMAN_API_KEY, or use the host MCP directly from the current session when available.")
 
     base_url = os.environ.get("POSTMAN_API_BASE_URL", "https://api.getpostman.com").rstrip("/")
@@ -490,6 +587,23 @@ def main() -> int:
     collection = current.get("collection")
     if not isinstance(collection, dict):
         raise SystemExit("Postman API response did not include a collection document.")
+
+    change_preview = preview_collection_changes(collection, discovery["apis"])
+    if args.preview:
+        print(
+            json.dumps(
+                {
+                    **summary,
+                    "auth_source": auth_source,
+                    "result": "preview",
+                    "changes": change_preview,
+                    "note": "No remote write was performed. Re-run with --apply to update Postman.",
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     merged = merge_collection(collection, discovery["apis"], target.host)
     response = api_request("PUT", f"{base_url}/collections/{target.collection_id}", api_key, {"collection": merged})
@@ -500,6 +614,7 @@ def main() -> int:
                 **summary,
                 "auth_source": auth_source,
                 "result": "updated",
+                "changes": change_preview,
                 "response_keys": sorted(response.keys()),
             },
             indent=2,

@@ -1,23 +1,59 @@
 {
   "skill_name": "postman-push",
+  "runner": "python3 evals/run_evals.py",
   "evals": [
     {
       "id": 1,
       "prompt": "把这个项目最近改动过的公开 API 同步到 Postman。项目里已经有 POSTMAN_WORKSPACE_ID、POSTMAN_COLLECTION_ID_OPEN 和对应 HOST，请优先只推送 Git diff 相关接口。",
       "expected_output": "识别当前宿主的 Postman MCP 或 API fallback，读取 .env，按增量模式发现公开接口并同步到 OPEN collection。",
-      "files": []
+      "files": ["evals/fixtures/sample-api/.env", "evals/fixtures/sample-api/openapi/openapi.json"],
+      "assertions": [
+        "默认 incremental 在没有 Git diff 证据时返回 api_count=0",
+        "返回 fallback_reason，且不静默全量扫描"
+      ]
     },
     {
       "id": 2,
       "prompt": "扫描当前仓库全部内部管理接口并推送到 Postman，内部接口应该归到 POSTMAN_COLLECTION_ID_INTERNAL，Host 用对应 _HOST 配置。",
       "expected_output": "执行全量扫描，按 internal/admin/private 启发式选中 INTERNAL collection，并生成包含说明、参数和 header 的请求项。",
-      "files": []
+      "files": ["evals/fixtures/sample-api/routes/admin.ts"],
+      "assertions": [
+        "允许 full fallback 后能发现 GET /admin/audit",
+        "能从 handler 上下文推断 query/header 参数"
+      ]
     },
     {
       "id": 3,
       "prompt": "这个环境没有可直接用的 Postman MCP，你还是要把 API 文档推到 Postman。优先看 .env 里的 collection 配置，并使用 POSTMAN_API_KEY 兜底。",
       "expected_output": "检测不到当前宿主 MCP 时走 Postman HTTP API，仍然能完成 collection 更新或给出缺失配置说明。",
-      "files": []
+      "files": ["evals/fixtures/collections/existing-open.json"],
+      "assertions": [
+        "HTTP fallback merge 按 METHOD + path 更新已有请求",
+        "保留已有 saved responses",
+        "新增请求按 tag 追加到 collection"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "项目 .env 使用 export 和 $VAR 组合配置 OPEN host，同时 INTERNAL collection 暂时没有 HOST。只预览公开接口，不应该因为 INTERNAL 缺 HOST 失败。",
+      "expected_output": "推送脚本和发现脚本使用同一套 env parser，OPEN host 被正确展开，只校验选中的 OPEN collection host。",
+      "files": ["evals/fixtures/sample-api/.env"],
+      "assertions": [
+        "默认 postman_push 输出 dry-run，且不拉取远端 collection",
+        "POSTMAN_COLLECTION_ID_OPEN_HOST=$API_HOST 能展开成真实 host",
+        "未选中的 INTERNAL 缺 HOST 不阻断 OPEN dry-run"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "我想先看 Postman 更新预览，但当前环境没有 POSTMAN_API_KEY。",
+      "expected_output": "使用 --preview 时没有 API key 不联网写入，返回 preview warning，说明无法获取 created/updated counts。",
+      "files": ["evals/fixtures/sample-api/openapi/openapi.json"],
+      "assertions": [
+        "--preview 在缺少 API key 时返回 result=preview",
+        "输出 auth_source=missing",
+        "不会执行远端 fetch 或 PUT"
+      ]
     }
   ]
 }

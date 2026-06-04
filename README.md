@@ -6,9 +6,9 @@
 
 - **自动检测 Postman MCP** — 识别当前 AI 宿主工具的 Postman MCP 配置
 - **多源 API 发现** — 优先解析 OpenAPI/Swagger，回退到框架路由与 Controller
-- **增量 / 全量同步** — 默认基于 Git diff 增量更新，也可全量扫描
+- **增量 / 全量同步** — 默认基于 Git diff 保守增量更新，也可显式全量扫描
 - **多 Collection 映射** — 按 internal / open 等规则自动选择目标 Collection
-- **双通道写入** — 优先走 Postman MCP，不可用时回退 Postman HTTP API
+- **双通道写入** — Agent 可优先走当前会话的 Postman MCP；本地脚本提供 Postman HTTP API 回退
 
 ## 适用场景
 
@@ -64,7 +64,7 @@ Collection 选择规则：
 - 「全量更新 Postman collection」
 - 「把对外接口推到 open collection」
 
-Agent 会按 `SKILL.md` 中的工作流自动执行检测、发现与推送。
+Agent 会按 `SKILL.md` 中的工作流自动执行检测、发现与推送。有 Postman MCP 写入工具时由 Agent 直接调用 MCP；`scripts/postman_push.py` 只负责 HTTP API 回退。
 
 ## 命令行脚本
 
@@ -84,6 +84,16 @@ python3 path/to/postman-push/scripts/detect_postman_config.py --json
 python3 path/to/postman-push/scripts/discover_apis.py \
   --repo "$PWD" \
   --mode incremental \
+  --json
+```
+
+默认增量模式不会在 Git diff 证据不足时自动扫描整个项目。若确认可以扩大扫描范围，可显式开启全量兜底：
+
+```bash
+python3 path/to/postman-push/scripts/discover_apis.py \
+  --repo "$PWD" \
+  --mode incremental \
+  --allow-full-fallback \
   --json
 ```
 
@@ -115,8 +125,30 @@ python3 path/to/postman-push/scripts/postman_push.py \
   --host-tool auto
 ```
 
+默认不联网、不写远端，只输出本地 dry-run 摘要。若要拉取已有 Collection 并查看新增/更新数量：
+
+```bash
+python3 path/to/postman-push/scripts/postman_push.py \
+  --repo "$PWD" \
+  --mode incremental \
+  --preview
+```
+
+确认后写入 Postman：
+
+```bash
+python3 path/to/postman-push/scripts/postman_push.py \
+  --repo "$PWD" \
+  --mode incremental \
+  --apply
+```
+
+如果增量模式没有发现 API，推送脚本会返回 `result: "no-op"`，不会写远端。若需要在推送流程中允许全量兜底，同样传入 `--allow-full-fallback`。
+
 ## 同步行为
 
+- 增量模式默认只处理显式 include 或 Git diff 相关接口，避免静默扩大同步范围
+- `--preview` 会输出 created / updated / preserved 计数；`--apply` 才会执行远端写入
 - 按 `METHOD + path` 匹配已有请求，存在则更新，不存在则追加
 - 路径参数 `:id`、`{id}`、`{{id}}` 视为等价
 - 保留 Collection 中无关请求、已保存响应及元数据
@@ -132,6 +164,7 @@ postman-push/
 ├── scripts/
 │   ├── detect_postman_config.py  # 检测 Postman MCP 与凭证
 │   ├── discover_apis.py          # API 发现，输出标准化 JSON
+│   ├── env_utils.py              # 共享 .env 解析逻辑
 │   └── postman_push.py           # 合并写入 Postman Collection
 ├── references/
 │   ├── mcp-detection.md          # 各宿主 MCP 检测策略

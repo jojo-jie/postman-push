@@ -14,8 +14,8 @@ Push project APIs into Postman with the least manual bookkeeping possible:
 3. Discover APIs from OpenAPI specs first, then from framework routes as a fallback.
    - OpenAPI discovery should resolve local `$ref`, path-level parameters, composed schemas, and nested request body fields.
    - Route discovery should use referenced DTOs / validators / schema models when available, not only fields directly accessed inside the handler.
-4. Default to incremental sync from Git diff; switch to full sync when the user asks or incremental detection is too weak.
-5. Update the matching Postman collection, using the host MCP directly when the session exposes it and using the helper script for Postman HTTP API fallback.
+4. Default to incremental sync from Git diff; switch to full sync only when the user asks, or when the Agent explicitly opts into full fallback with `--allow-full-fallback` after explaining why incremental detection is too weak.
+5. Update the matching Postman collection. When the current session exposes Postman MCP write tools, the Agent should call those tools directly; `scripts/postman_push.py` is the Postman HTTP API fallback helper, not an MCP client.
 
 ## Triggering Scenarios
 
@@ -100,20 +100,41 @@ python3 scripts/discover_apis.py --repo "$PWD" --mode full --json
 
 If the user specifies modules, route files, or path prefixes, pass them through with `--include`.
 
+Incremental discovery is conservative by default:
+
+- If there are no changed API-relevant files, it returns zero APIs instead of silently scanning the whole project.
+- If changed files do not contain route/spec evidence, it returns zero APIs and reports `fallback_reason`.
+- Only pass `--allow-full-fallback` when the user accepts a wider scan or the task explicitly calls for best-effort sync.
+
 ### 4. Push to Postman
 
-Run:
+If no Postman MCP write tools are available in the current session, preview the HTTP API fallback first:
 
 ```bash
 python3 scripts/postman_push.py \
   --repo "$PWD" \
   --mode incremental \
-  --host-tool auto
+  --host-tool auto \
+  --preview
+```
+
+After the preview matches the intended scope, apply the update:
+
+```bash
+python3 scripts/postman_push.py \
+  --repo "$PWD" \
+  --mode incremental \
+  --host-tool auto \
+  --apply
 ```
 Behavior:
 
-- If the current session already exposes a Postman MCP tool, use that MCP tool directly for the actual write.
-- Use `scripts/postman_push.py` as the Postman HTTP API fallback helper.
+- If the current session already exposes Postman MCP write tools, use those tools directly for the actual write instead of expecting `scripts/postman_push.py` to call MCP.
+- Use `scripts/postman_push.py` only as the Postman HTTP API fallback helper.
+- In incremental mode, the helper will no-op when no APIs are discovered; pass `--allow-full-fallback` only after deciding that a full fallback scan is acceptable.
+- Without `--preview` or `--apply`, the helper performs a local dry run only and does not fetch or write the remote collection.
+- Use `--preview` to fetch the existing Postman collection and print created/updated/preserved counts without writing.
+- Use `--apply` to update the remote Postman collection.
 - Do not treat arbitrary MCP bearer tokens as interchangeable with Postman API keys.
 - Only update requests whose normalized signature matches the same `METHOD + path`.
 - Treat `:id`, `{id}`, and `{{id}}` as the same path parameter form for matching.

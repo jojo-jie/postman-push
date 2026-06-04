@@ -61,6 +61,8 @@ When using Git diff, include changed files that are likely to affect API behavio
 If the diff only changes DTO/schema files or deep business logic with no route evidence, either:
 
 - follow explicit user-selected paths/modules
-- or fall back to a wider scan and say that incremental confidence was low
+- or, only when the caller has explicitly allowed it, fall back to a wider scan and say that incremental confidence was low
+
+Incremental discovery should not silently widen to a full scan. Return zero APIs with a clear `fallback_reason` when Git diff evidence is missing or too weak, unless the caller passes an explicit full-fallback option such as `--allow-full-fallback`.
 
 Discovery output should include the effective scan scope and fallback reason when incremental mode widens to a full scan.

@@ -7,9 +7,16 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from env_utils import load_env_files
 
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD")
 METHOD_PATTERN = "|".join(method.lower() for method in HTTP_METHODS)
@@ -60,23 +67,7 @@ class ApiEndpoint:
 
 
 def load_env_file(base_dir: Path, env_file: Path | None) -> dict[str, str]:
-    paths = []
-    if env_file:
-        paths.append(env_file)
-    else:
-        for candidate in (".env", ".env.local", ".env.development"):
-            paths.append(base_dir / candidate)
-    values: dict[str, str] = {}
-    for path in paths:
-        if not path.exists():
-            continue
-        for raw in path.read_text().splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip("'\"")
-    return values
+    return load_env_files(base_dir, env_file)
 
 
 def git_changed_files(repo: Path) -> list[str]:
@@ -104,7 +95,7 @@ def git_changed_files(repo: Path) -> list[str]:
 
 
 def iter_text_files(repo: Path, changed_only: list[str] | None, includes: list[str]) -> Iterable[Path]:
-    changed_set = {repo / item for item in changed_only} if changed_only else None
+    changed_set = None if changed_only is None else {repo / item for item in changed_only}
     for path in repo.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in TEXT_EXTS:
             continue
@@ -123,15 +114,16 @@ def likely_spec_file(path: Path) -> bool:
     return any(token in name for token in ("openapi", "swagger", "postman"))
 
 
-def load_yaml_if_available(text: str):
+def load_yaml_if_available(text: str, warnings: list[str]):
     try:
         import yaml  # type: ignore
     except ModuleNotFoundError:
+        warnings.append("PyYAML is not installed; YAML OpenAPI files cannot be parsed.")
         return None
     return yaml.safe_load(text)
 
 
-def openapi_endpoints(path: Path) -> list[ApiEndpoint]:
+def openapi_endpoints(path: Path, warnings: list[str]) -> list[ApiEndpoint]:
     text = path.read_text()
     data = None
     if path.suffix.lower() == ".json":
@@ -140,7 +132,7 @@ def openapi_endpoints(path: Path) -> list[ApiEndpoint]:
         except json.JSONDecodeError:
             return []
     elif path.suffix.lower() in {".yaml", ".yml"}:
-        data = load_yaml_if_available(text)
+        data = load_yaml_if_available(text, warnings)
     if not isinstance(data, dict) or "paths" not in data:
         return []
     paths = data.get("paths", {})
@@ -877,12 +869,12 @@ def dedupe(endpoints: list[ApiEndpoint]) -> list[ApiEndpoint]:
     return list(selected.values())
 
 
-def discover_from_paths(candidate_paths: list[Path], schema_paths: list[Path]) -> list[ApiEndpoint]:
+def discover_from_paths(candidate_paths: list[Path], schema_paths: list[Path], warnings: list[str]) -> list[ApiEndpoint]:
     schema_index = merge_schema_indexes(schema_paths)
     endpoints: list[ApiEndpoint] = []
     for path in candidate_paths:
         if likely_spec_file(path):
-            endpoints.extend(openapi_endpoints(path))
+            endpoints.extend(openapi_endpoints(path, warnings))
     for path in candidate_paths:
         if path.suffix.lower() in ROUTE_EXTS:
             endpoints.extend(route_endpoints(path, schema_index))
@@ -898,6 +890,7 @@ def build_output(
     candidate_paths: list[Path],
     scan_scope: str,
     fallback_reason: str | None,
+    warnings: list[str],
 ) -> dict:
     collections = []
     pattern = re.compile(r"^POSTMAN_COLLECTION_ID_(.+)$")
@@ -922,6 +915,7 @@ def build_output(
         "candidate_files": [str(path.relative_to(repo)) if path.is_relative_to(repo) else str(path) for path in candidate_paths],
         "workspace_id": env.get("POSTMAN_WORKSPACE_ID"),
         "collections": collections,
+        "warnings": sorted(set(warnings)),
         "api_count": len(endpoints),
         "apis": [asdict(endpoint) for endpoint in sorted(endpoints, key=lambda item: item.signature)],
     }
@@ -933,30 +927,49 @@ def main() -> int:
     parser.add_argument("--mode", choices=("full", "incremental"), default="incremental")
     parser.add_argument("--include", action="append", default=[], help="substring filter for routes/modules/files")
     parser.add_argument("--env-file", help="explicit env file to load")
+    parser.add_argument(
+        "--allow-full-fallback",
+        action="store_true",
+        help="allow incremental discovery to widen to a full scan when Git diff evidence is weak",
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON")
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
     env = load_env_file(repo, Path(args.env_file).resolve() if args.env_file else None)
     changed_files = git_changed_files(repo) if args.mode == "incremental" else []
+    warnings: list[str] = []
 
     scan_scope = "incremental" if args.mode == "incremental" else "full"
     fallback_reason = None
-    candidate_paths = list(iter_text_files(repo, changed_files if changed_files else None, args.include))
-    if args.mode == "incremental" and not candidate_paths:
-        candidate_paths = list(iter_text_files(repo, None, args.include))
-        scan_scope = "full-fallback"
-        fallback_reason = "Git diff did not provide changed text files, so discovery scanned the requested scope."
 
     schema_paths = list(iter_text_files(repo, None, args.include))
-    endpoints = discover_from_paths(candidate_paths, schema_paths)
-    if args.mode == "incremental" and not endpoints and set(candidate_paths) != set(schema_paths):
+    if args.mode == "incremental" and args.include:
+        candidate_paths = list(iter_text_files(repo, None, args.include))
+        scan_scope = "explicit-include"
+    elif args.mode == "incremental":
+        candidate_paths = list(iter_text_files(repo, changed_files if changed_files else [], args.include))
+        if not candidate_paths:
+            fallback_reason = "Git diff did not provide changed text API files; no full scan was run without --allow-full-fallback."
+            if args.allow_full_fallback:
+                candidate_paths = schema_paths
+                scan_scope = "full-fallback"
+                fallback_reason = "Git diff did not provide changed text API files, so --allow-full-fallback widened discovery to the requested scope."
+    else:
         candidate_paths = schema_paths
-        scan_scope = "full-fallback"
-        fallback_reason = "Changed files did not contain discoverable API route/spec evidence, so discovery scanned the requested scope."
-        endpoints = discover_from_paths(candidate_paths, schema_paths)
 
-    output = build_output(repo, dedupe(endpoints), args.mode, changed_files, env, candidate_paths, scan_scope, fallback_reason)
+    endpoints = discover_from_paths(candidate_paths, schema_paths, warnings)
+    if args.mode == "incremental" and candidate_paths and not endpoints and set(candidate_paths) != set(schema_paths):
+        candidate_paths = schema_paths
+        fallback_reason = "Changed files did not contain discoverable API route/spec evidence; no full scan was run without --allow-full-fallback."
+        if args.allow_full_fallback:
+            scan_scope = "full-fallback"
+            fallback_reason = "Changed files did not contain discoverable API route/spec evidence, so --allow-full-fallback widened discovery to the requested scope."
+            endpoints = discover_from_paths(candidate_paths, schema_paths, warnings)
+        else:
+            candidate_paths = []
+
+    output = build_output(repo, dedupe(endpoints), args.mode, changed_files, env, candidate_paths, scan_scope, fallback_reason, warnings)
     if args.json:
         print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
